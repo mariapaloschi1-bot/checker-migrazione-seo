@@ -2,11 +2,12 @@ import streamlit as st
 import pandas as pd
 import requests
 from urllib.parse import urljoin
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --------------------------------------------------
 # CONFIGURAZIONE BASE + STILE
 # --------------------------------------------------
-st.set_page_config(page_title="Redirect Checker", layout="wide")
+st.set_page_config(page_title="🛸Redirect Checker by Maria Paloschi👾", layout="wide")
 
 # Tema: sfondo nero, pulsanti in gradiente #ffebf2 → #a078b8
 st.markdown(
@@ -36,7 +37,7 @@ st.markdown(
     [data-testid="metric-container"] {
         background-color: #111111;
         border-radius: 0.75rem;
-        padding: 0.75rem 0.75rem 0.6rem 0.75rem;
+        padding: 0.75rem 0.6rem;
         border: 1px solid #333333;
     }
 
@@ -52,7 +53,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("🔁 Redirect Checker per Migrazioni")
+st.title("🪄 Redirect Checker per Migrazioni")
 
 st.write(
     "Carica un file CSV con le colonne **'Redirect from'** e **'Redirect to'** "
@@ -177,7 +178,6 @@ def style_status(val, col_type):
         return ""
 
     if col_type == "from":
-        # Colonna D ideale
         if code == 404:
             return "color: white; background-color: red; font-weight: bold;"
         if code == 301:
@@ -185,7 +185,6 @@ def style_status(val, col_type):
         if code == 200:
             return "background-color: orange; font-weight: normal;"
     else:
-        # Colonna F ideale
         if code == 404:
             return "color: white; background-color: red; font-weight: bold;"
         if code == 301:
@@ -201,6 +200,24 @@ def highlight_row_if_loop(row):
     if row.get("loop_from") or row.get("loop_to"):
         return ["background-color: #ffcccc"] * len(row)
     return [""] * len(row)
+
+
+def process_row(idx, from_url, to_url):
+    """Elabora una singola riga (in parallelo nei thread)."""
+    res_from = check_url(from_url)
+    res_to = check_url(to_url)
+    csv_row_number = idx + 2  # header = riga 1
+    return {
+        "CSV row": csv_row_number,
+        "Redirect from": from_url,
+        "Status from (primo codice)": res_from["first_code"],
+        "Status from (finale)": res_from["final_code"],
+        "loop_from": res_from["loop"],
+        "Redirect to": to_url,
+        "Status to (primo codice)": res_to["first_code"],
+        "Status to (finale)": res_to["final_code"],
+        "loop_to": res_to["loop"],
+    }
 
 
 # --------------------------------------------------
@@ -226,123 +243,126 @@ if uploaded_file is not None:
     else:
         st.success(f"Trovate colonne: **{from_col}** (from), **{to_col}** (to)")
 
-        # Limite di righe per evitare time-out (puoi alzare/abbassare)
+        # Limite di righe analizzate per run
         max_righe = st.number_input(
             "Quante righe vuoi analizzare in questa esecuzione?",
             min_value=1,
             max_value=original_len,
-            value=min(original_len, 500),
-            step=50,
+            value=min(original_len, 1000),
+            step=100,
         )
         df = df.head(int(max_righe))
+
+        # Numero di thread (più alto = più veloce ma più carico)
+        n_workers = st.slider(
+            "Quanti thread in parallelo usare?",
+            min_value=5,
+            max_value=40,
+            value=20,
+            step=5,
+            help="Aumenta per velocizzare l'elaborazione di molte URL. Se il server è debole, tienilo più basso."
+        )
+
         st.info(f"Sto analizzando {len(df)} righe su {original_len} totali nel file.")
 
-        results = []
-        cache = {}
+        # Bottone per avviare il check
+        if st.button("🐨 Avvia l'analisi"):
+            progress = st.progress(0)
+            status_text = st.empty()
 
-        # Calcolo risultati per ogni riga
-        for idx, row in df.iterrows():
-            from_url = row[from_col]
-            to_url = row[to_col]
+            results = []
+            total = len(df)
+            done = 0
 
-            # Cache per non chiamare 2 volte la stessa URL
-            if from_url in cache:
-                res_from = cache[from_url]
-            else:
-                res_from = check_url(from_url)
-                cache[from_url] = res_from
+            # Thread pool per elaborare le righe in parallelo
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                futures = []
+                for idx, row in df.iterrows():
+                    from_url = row[from_col]
+                    to_url = row[to_col]
+                    futures.append(executor.submit(process_row, idx, from_url, to_url))
 
-            if to_url in cache:
-                res_to = cache[to_url]
-            else:
-                res_to = check_url(to_url)
-                cache[to_url] = res_to
+                for f in as_completed(futures):
+                    res = f.result()
+                    results.append(res)
+                    done += 1
+                    progress.progress(done / total)
+                    status_text.text(f"Elaborate {done} righe su {total}...")
 
-            # Numero di riga nel CSV (header = riga 1)
-            csv_row_number = idx + 2
+            status_text.text("Analisi completata.")
+            progress.progress(1.0)
 
-            results.append({
-                "CSV row": csv_row_number,
-                "Redirect from": from_url,
-                "Status from (primo codice)": res_from["first_code"],
-                "Status from (finale)": res_from["final_code"],
-                "loop_from": res_from["loop"],
-                "Redirect to": to_url,
-                "Status to (primo codice)": res_to["first_code"],
-                "Status to (finale)": res_to["final_code"],
-                "loop_to": res_to["loop"],
-            })
+            # DataFrame finale
+            res_df = pd.DataFrame(results).sort_values("CSV row")
 
-        res_df = pd.DataFrame(results)
+            # --------------------------------------------------
+            # METRICHE E RIASSUNTI
+            # --------------------------------------------------
+            total = len(res_df)
 
-        # --------------------------------------------------
-        # METRICHE E RIASSUNTI
-        # --------------------------------------------------
-        total = len(res_df)
+            total_redirects = (
+                res_df["Status from (primo codice)"].between(300, 399) |
+                res_df["Status to (primo codice)"].between(300, 399)
+            ).sum()
 
-        total_redirects = (
-            res_df["Status from (primo codice)"].between(300, 399) |
-            res_df["Status to (primo codice)"].between(300, 399)
-        ).sum()
+            total_loops = (res_df["loop_from"] | res_df["loop_to"]).sum()
 
-        total_loops = (res_df["loop_from"] | res_df["loop_to"]).sum()
-
-        problematic_mask = (
-            res_df["loop_from"] |
-            res_df["loop_to"] |
-            res_df["Status from (finale)"].fillna(0).between(400, 599) |
-            res_df["Status to (finale)"].fillna(0).between(400, 599)
-        )
-        total_problematic = problematic_mask.sum()
-        problematic_rows = list(res_df.loc[problematic_mask, "CSV row"])
-
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            st.markdown("### 📊 Totale righe")
-            st.metric(label="Righe analizzate", value=int(total))
-
-        with col2:
-            st.markdown("### 🔁 Redirect")
-            st.metric(label="Righe con redirect", value=int(total_redirects))
-
-        with col3:
-            st.markdown("### 🔂 Loop di redirect")
-            st.metric(label="Loop trovati", value=int(total_loops))
-            if total_loops == 0:
-                st.caption("TUTTO OK!")
-
-        with col4:
-            st.markdown("### ⚠️ Redirect problematici")
-            st.metric(label="Righe problematiche", value=int(total_problematic))
-
-        st.markdown("---")
-        st.markdown("### Dettaglio redirect problematici")
-        if total_problematic > 0:
-            st.error("Sono stati trovati redirect problematici.")
-            st.write("Righe nel CSV (contando l'intestazione come riga 1):")
-            st.write(problematic_rows)
-        else:
-            st.success("Nessun redirect problematico rilevato nelle righe analizzate.")
-
-        # --------------------------------------------------
-        # TABELLA CON COLORI E LOOP EVIDENZIATI
-        # --------------------------------------------------
-        styled = (
-            res_df.style
-            .apply(
-                lambda col: [style_status(v, "from") for v in col]
-                if col.name in ["Status from (primo codice)", "Status from (finale)"]
-                else [""] * len(col)
+            problematic_mask = (
+                res_df["loop_from"] |
+                res_df["loop_to"] |
+                res_df["Status from (finale)"].fillna(0).between(400, 599) |
+                res_df["Status to (finale)"].fillna(0).between(400, 599)
             )
-            .apply(
-                lambda col: [style_status(v, "to") for v in col]
-                if col.name in ["Status to (primo codice)", "Status to (finale)"]
-                else [""] * len(col)
-            )
-            .apply(highlight_row_if_loop, axis=1)
-        )
+            total_problematic = problematic_mask.sum()
+            problematic_rows = list(res_df.loc[problematic_mask, "CSV row"])
 
-        st.markdown("---")
-        st.markdown("### 🧾 Tabella completa")
-        st.dataframe(styled, use_container_width=True)
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.markdown("### 📊 Totale righe")
+                st.metric(label="Righe analizzate", value=int(total))
+
+            with col2:
+                st.markdown("### 🔁 Redirect")
+                st.metric(label="Righe con redirect", value=int(total_redirects))
+
+            with col3:
+                st.markdown("### 🔂 Loop di redirect")
+                st.metric(label="Loop trovati", value=int(total_loops))
+                if total_loops == 0:
+                    st.caption("TUTTO OK!")
+
+            with col4:
+                st.markdown("### ⚠️ Redirect problematici")
+                st.metric(label="Righe problematiche", value=int(total_problematic))
+
+            st.markdown("---")
+            st.markdown("### Dettaglio redirect problematici")
+            if total_problematic > 0:
+                st.error("Sono stati trovati redirect problematici.")
+                st.write("Righe nel CSV (contando l'intestazione come riga 1):")
+                st.write(problematic_rows)
+            else:
+                st.success("Nessun redirect problematico rilevato nelle righe analizzate.")
+
+            # --------------------------------------------------
+            # TABELLA CON COLORI E LOOP EVIDENZIATI
+            # --------------------------------------------------
+            styled = (
+                res_df.style
+                .apply(
+                    lambda col: [style_status(v, "from") for v in col]
+                    if col.name in ["Status from (primo codice)", "Status from (finale)"]
+                    else [""] * len(col)
+                )
+                .apply(
+                    lambda col: [style_status(v, "to") for v in col]
+                    if col.name in ["Status to (primo codice)", "Status to (finale)"]
+                    else [""] * len(col)
+                )
+                .apply(highlight_row_if_loop, axis=1)
+            )
+
+            st.markdown("---")
+            st.markdown("### 🧾 Tabella completa")
+            st.dataframe(styled, use_container_width=True)
