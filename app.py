@@ -46,21 +46,27 @@ st.markdown(
     [data-testid="stFileUploaderDropzone"] > div {
         color: #000000;
         font-weight: 500;
+        font-family: 'Poppins', sans-serif;
     }
 
-    /* Metric box con gradiente e testo maiuscolo */
-    [data-testid="metric-container"] {
-        background: linear-gradient(90deg, #ffebf2, #a078b8);
+    /* Metric box con gradiente e testo maiuscolo nero */
+    div[data-testid="metric-container"] {
+        background: linear-gradient(90deg, #ffebf2, #a078b8) !important;
         border-radius: 0.75rem;
         padding: 0.75rem 0.6rem;
         border: none;
         color: #000000 !important;
     }
 
-    [data-testid="metric-container"] > div > div {
+    div[data-testid="metric-container"] * {
         color: #000000 !important;
         text-transform: uppercase;
         font-family: 'Poppins', sans-serif;
+    }
+
+    /* Progress bar con gradiente */
+    [data-testid="stProgress"] > div > div > div {
+        background: linear-gradient(90deg, #ffebf2, #a078b8) !important;
     }
 
     /* Tabella: font Poppins e testo chiaro */
@@ -78,13 +84,13 @@ st.title("🪄 Redirect Magic Checker 🐨")
 
 st.markdown(
     """
-    Questo tool 🔮 ti aiuta a controllare i redirect durante una migrazione (fino a **2.500 URL**).  
-    Carica un CSV con le colonne **Redirect from** (URL di partenza) e **Redirect to** (URL di arrivo):  
+    Questo tool 🔮 ti aiuta a controllare i redirect durante una migrazione (fino a **1.500 URL**).  
+    Carica un CSV con le colonne **Redirect from** (Intestazione Colonna A) e **Redirect to** (Intestazione Colonna B):  
     il tool controllerà gli status code, individuerà i loop di redirect e segnalerà i redirect problematici.
     """
 )
 
-uploaded_file = st.file_uploader("Trascina qui il tuo CSV (max ~2.500 URL)", type=["csv"])
+uploaded_file = st.file_uploader("Trascina qui il tuo CSV (max ~1.500 URL)", type=["csv"])
 
 
 # --------------------------------------------------
@@ -277,13 +283,13 @@ if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
     original_len = len(df)
 
-    # Limite logico a 2500 URL
-    if original_len > 2500:
+    # Limite logico a 1500 URL
+    if original_len > 1500:
         st.warning(
-            f"Hai caricato {original_len} righe. Il tool è pensato per migrazioni fino a 2.500 URL: "
-            "verranno considerate solo le prime 2.500."
+            f"Hai caricato {original_len} righe. Il tool è pensato per migrazioni fino a 1.500 URL: "
+            "verranno considerate solo le prime 1.500."
         )
-        df = df.head(2500)
+        df = df.head(1500)
         original_len = len(df)
 
     # Riconosco le colonne from/to in modo robusto
@@ -345,9 +351,12 @@ if uploaded_file is not None:
                     results.append(res)
                     done += 1
                     progress.progress(done / total)
-                    status_text.text(f"Elaborate {done} righe su {total}...")
+                    status_text.markdown(
+                        f"**Elaborazione:** {done}/{total} righe "
+                        f"({(done / total) * 100:.1f}%)"
+                    )
 
-            status_text.text("Analisi completata.")
+            status_text.markdown("✅ **Analisi completata.**")
             progress.progress(1.0)
 
             # DataFrame completo
